@@ -67,36 +67,37 @@ install_vulkan_loader() {
   # libvulkan.so.1 (the Khronos loader that volk dlopen()s at runtime) is not part
   # of the NVIDIA driver and is absent from the CUDA builder image; vulkan-tools
   # provides vulkaninfo for the device sanity check. Both ship as native el8 RPMs.
-  # The NVIDIA ICD also needs X11 client libraries on headless runners.
+  # The NVIDIA ICD also needs EGL and X11 client libraries on headless runners.
   if command -v dnf >/dev/null 2>&1; then
-    _maybe_sudo dnf install -y vulkan-loader vulkan-tools libX11 libXext
+    _maybe_sudo dnf install -y vulkan-loader vulkan-tools libglvnd-egl libX11 libXext
   fi
 }
 
 _find_nvidia_vulkan_library() {
-  # NVIDIA implements its Vulkan ICD inside libGLX_nvidia.so.0. The NVIDIA
-  # container runtime mounts this library into the container (it is pulled from
-  # the driver's ldcache when NVIDIA_DRIVER_CAPABILITIES includes graphics/all),
-  # so prefer ldconfig and fall back to the usual mount locations.
-  local lib cand
-  lib="$(ldconfig -p 2>/dev/null | awk '/libGLX_nvidia\.so\.0/ {print $NF; exit}')"
-  if [ -z "${lib}" ]; then
-    for cand in /usr/lib64/libGLX_nvidia.so.0 \
-        /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0 \
-        /usr/lib/libGLX_nvidia.so.0; do
+  # NVIDIA provides EGL and GLX Vulkan ICDs. Prefer EGL on headless runners;
+  # the GLX entry point can fail to initialize without an X server.
+  local soname lib cand
+  for soname in libEGL_nvidia.so.0 libGLX_nvidia.so.0; do
+    lib="$(ldconfig -p 2>/dev/null | awk -v name="${soname}" '$1 == name {print $NF; exit}')"
+    if [ -n "${lib}" ]; then
+      printf '%s' "${lib}"
+      return
+    fi
+    for cand in "/usr/lib64/${soname}" \
+        "/usr/lib/x86_64-linux-gnu/${soname}" \
+        "/usr/lib/${soname}"; do
       if [ -e "${cand}" ]; then
-        lib="${cand}"
-        break
+        printf '%s' "${cand}"
+        return
       fi
     done
-  fi
-  printf '%s' "${lib}"
+  done
 }
 
 _vulkan_has_real_device() {
   # True if the loader enumerates a hardware GPU. vulkaninfo can exit non-zero
   # for unrelated reasons (no display/WSI), so key off the reported deviceType.
-  command -v vulkaninfo >/dev/null 2>&1 || return 0
+  command -v vulkaninfo >/dev/null 2>&1 || return 1
   vulkaninfo --summary 2>/dev/null |
     grep -qE 'PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED|VIRTUAL)_GPU'
 }
@@ -133,8 +134,8 @@ JSON
       return
     fi
     echo "ERROR: ${nvidia_lib} present but no GPU enumerated."
-    # Surface why the NVIDIA driver did not enumerate (e.g. a missing dependency
-    # of libGLX_nvidia, or no render node).
+    # Surface missing ICD dependencies and device-enumeration errors.
+    ldd "${nvidia_lib}" || true
     if command -v vulkaninfo >/dev/null 2>&1; then
       echo "--- NVIDIA Vulkan ICD diagnostic ---"
       VK_LOADER_DEBUG=warn vulkaninfo --summary 2>&1 | head -40 || true
