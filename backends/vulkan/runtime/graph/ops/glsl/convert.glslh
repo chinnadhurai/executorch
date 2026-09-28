@@ -13,7 +13,7 @@
 
 #ifdef T
 
-#if T == float16_t
+#if T_IS_FLOAT16
 
 #define convert_to_T(x) T(clamp(x, -65504, 65504));
 
@@ -21,7 +21,7 @@
 
 #define convert_to_T(x) T(x);
 
-#endif // T == float16_t
+#endif // T_IS_FLOAT16
 
 #endif // T
 

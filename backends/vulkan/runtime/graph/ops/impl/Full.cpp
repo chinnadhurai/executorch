@@ -40,12 +40,8 @@ void add_full_node(
   if (graph.dtype_of(out) == vkapi::kInt) {
     fill_value_buffer =
         graph.create_params_buffer(graph.extract_scalar<int32_t>(fill_value));
-  } else if (
-      graph.dtype_of(out) == vkapi::kBool ||
-      graph.dtype_of(out) == vkapi::kByte) {
-    const uint32_t value = graph.dtype_of(out) == vkapi::kBool
-        ? graph.extract_scalar<bool>(fill_value)
-        : graph.extract_scalar<uint32_t>(fill_value);
+  } else if (graph.dtype_of(out) == vkapi::kBool) {
+    const uint32_t value = graph.extract_scalar<bool>(fill_value);
     fill_value_buffer = graph.create_params_buffer(value);
   } else {
     fill_value_buffer =

@@ -39,7 +39,7 @@ class TestVkGraphBuilderScalarTensor(unittest.TestCase):
         self.assertEqual(len(set(ids)), len(scalars))
         for value, value_id, serialized in zip(scalars, ids, expected):
             self.assertEqual(builder.get_or_create_scalar_value(value), value_id)
-            self.assertEqual(builder.values[value_id].value, serialized)
+            self.assertEqual(repr(builder.values[value_id].value), repr(serialized))
 
     def test_aten_scalar_tensor_keeps_namespace(self):
         class Mask(torch.nn.Module):

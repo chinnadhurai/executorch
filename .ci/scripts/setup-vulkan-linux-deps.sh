@@ -67,8 +67,9 @@ install_vulkan_loader() {
   # libvulkan.so.1 (the Khronos loader that volk dlopen()s at runtime) is not part
   # of the NVIDIA driver and is absent from the CUDA builder image; vulkan-tools
   # provides vulkaninfo for the device sanity check. Both ship as native el8 RPMs.
+  # The NVIDIA ICD also needs X11 client libraries on headless runners.
   if command -v dnf >/dev/null 2>&1; then
-    _maybe_sudo dnf install -y vulkan-loader vulkan-tools
+    _maybe_sudo dnf install -y vulkan-loader vulkan-tools libX11 libXext
   fi
 }
 
@@ -131,9 +132,9 @@ JSON
       echo "Real NVIDIA GPU selected; pinned Vulkan ICD to ${nvidia_lib}"
       return
     fi
-    echo "WARNING: ${nvidia_lib} present but no GPU enumerated; using SwiftShader."
+    echo "ERROR: ${nvidia_lib} present but no GPU enumerated."
     # Surface why the NVIDIA driver did not enumerate (e.g. a missing dependency
-    # of libGLX_nvidia, or no render node) so the fallback is diagnosable in CI.
+    # of libGLX_nvidia, or no render node).
     if command -v vulkaninfo >/dev/null 2>&1; then
       echo "--- NVIDIA Vulkan ICD diagnostic ---"
       VK_LOADER_DEBUG=warn vulkaninfo --summary 2>&1 | head -40 || true
@@ -141,15 +142,15 @@ JSON
     fi
     unset VK_ICD_FILENAMES
   else
-    echo "WARNING: no NVIDIA Vulkan driver library found; using SwiftShader."
+    echo "ERROR: no NVIDIA Vulkan driver library found."
   fi
-  install_swiftshader
+  return 1
 }
 
 VULKAN_SDK_VERSION="1.4.321.1"
 
 # The no-argument default installs SwiftShader so the existing CPU-runner CI is
-# unchanged. Pass "real-gpu" to prefer a real system ICD when one is present.
+# unchanged. Pass "real-gpu" to require a real system ICD.
 case "${1:-swiftshader}" in
   real-gpu)
     # Do not download the LunarG SDK here: its prebuilt glslc cannot run on the

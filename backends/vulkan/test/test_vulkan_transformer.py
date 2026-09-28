@@ -22,6 +22,7 @@ from executorch.backends.vulkan.serialization.vulkan_graph_serialize import (
     flatbuffer_to_vk_graph,
 )
 from executorch.exir import EdgeCompileConfig, to_edge_transform_and_lower
+from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.lowered_backend_module import LoweredBackendModule
 from torch.export import Dim, export
 
@@ -221,14 +222,39 @@ class TestVulkanTransformer(unittest.TestCase):
         ):
             with self.subTest(positive=positive, negative=negative):
                 model = WhereScalars(positive, negative)
-                edge = to_edge_transform_and_lower(
-                    export(model, inputs[0]),
-                    partitioner=[VulkanPartitioner()],
+                fully_delegated = isinstance(positive, float) or isinstance(
+                    negative, float
                 )
-                self.assertIn(
-                    torch.ops.higher_order.executorch_call_delegate,
-                    [node.target for node in edge.exported_program().graph.nodes],
-                )
+                edge = self._lower(model, inputs[0], fully_delegated=fully_delegated)
+                if not fully_delegated:
+                    self.assertEqual(
+                        [
+                            node.target
+                            for node in edge.exported_program().graph.nodes
+                            if node.op == "call_function"
+                            and node.target != operator.getitem
+                        ],
+                        [
+                            torch.ops.higher_order.executorch_call_delegate,
+                            exir_ops.edge.aten.where.self,
+                        ],
+                    )
+                self._run(edge, model, inputs, atol=0, rtol=0)
+
+    def test_scalar_tensor_dtypes(self):
+        class ScalarTensor(torch.nn.Module):
+            def __init__(self, dtype):
+                super().__init__()
+                self.dtype = dtype
+
+            def forward(self, x):
+                return torch.scalar_tensor(2.5, dtype=self.dtype)
+
+        inputs = [(torch.ones(1),)]
+        for dtype in (torch.float16, torch.float32, torch.int32):
+            with self.subTest(dtype=dtype):
+                model = ScalarTensor(dtype)
+                edge = self._lower(model, inputs[0])
                 self._run(edge, model, inputs, atol=0, rtol=0)
 
     def test_dynamic_expand(self):
@@ -524,6 +550,8 @@ class TestVulkanTransformer(unittest.TestCase):
                     torch.ops.aten.mul.Scalar(x, value),
                     torch.full((n,), value),
                     torch.scalar_tensor(value, dtype=torch.int64),
+                    torch.ops.aten.mul.Scalar(x, n * 0.5),
+                    x + torch.full((n,), n * 0.5),
                     torch.full((n,), 0.5),
                     F.gelu(x),
                 )
@@ -536,7 +564,55 @@ class TestVulkanTransformer(unittest.TestCase):
         self.assertTrue(_vulkan_graphs(edge))
         self._run(edge, model, inputs)
 
-    def test_partition_4d_reductions(self):
+    def test_dynamic_compare_scalars_fall_back(self):
+        class Compare(torch.nn.Module):
+            def __init__(self, op):
+                super().__init__()
+                self.op = op
+
+            def forward(self, x):
+                return self.op(x, x.shape[1])
+
+        inputs = [
+            (torch.arange(2 * s, dtype=torch.float32).reshape(2, s),)
+            for s in (16, 3, 31, 2, 16)
+        ]
+        for op in (torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge):
+            with self.subTest(op=op):
+                model = Compare(op)
+                edge = self._lower(
+                    model,
+                    inputs[0],
+                    ({1: Dim("s", min=2, max=32)},),
+                    fully_delegated=False,
+                )
+                self.assertEqual(_vulkan_graphs(edge), [])
+                self._run(edge, model, inputs, atol=0, rtol=0)
+
+    def test_compare_scalar_values_fall_back(self):
+        class Compare(torch.nn.Module):
+            def __init__(self, op, value):
+                super().__init__()
+                self.op = op
+                self.value = value
+
+            def forward(self, x):
+                return self.op(x, self.value)
+
+        for op in (torch.eq, torch.ne, torch.lt, torch.le, torch.gt, torch.ge):
+            for x, value in (
+                (torch.tensor([-1.0, 0.0, 1.0, 2.0]), torch.nan),
+                (torch.tensor([-3, 0, 1, 7], dtype=torch.int32), 2**40),
+                (torch.tensor([-(2**40), 0, 2**40, 2**40 + 1]), 2**40),
+            ):
+                with self.subTest(op=op, dtype=x.dtype, value=value):
+                    model = Compare(op, value)
+                    inputs = [(x,)]
+                    edge = self._lower(model, inputs[0], fully_delegated=False)
+                    self.assertEqual(_vulkan_graphs(edge), [])
+                    self._run(edge, model, inputs, atol=0, rtol=0)
+
+    def test_4d_reductions(self):
         class Reduce(torch.nn.Module):
             def __init__(self, op, dim):
                 super().__init__()
@@ -556,13 +632,36 @@ class TestVulkanTransformer(unittest.TestCase):
                 (2, -1, True),
             ):
                 with self.subTest(op=op, batch=batch, dim=dim):
-                    x = torch.randn(batch, 3, 4, 5)
-                    if op == torch.any:
-                        x = x > 0
-                    edge = self._lower(Reduce(op, dim), (x,), fully_delegated=supported)
+                    values = torch.arange(batch * 3 * 4 * 5).reshape(batch, 3, 4, 5)
+                    x = (
+                        values % 7 == 0
+                        if op == torch.any
+                        else -(values.float() + 1) / 7
+                    )
+                    model = Reduce(op, dim)
+                    edge = self._lower(model, (x,), fully_delegated=supported)
                     if not supported:
                         self.assertEqual(_vulkan_graphs(edge), [])
-                    edge.to_executorch()
+                    self._run(edge, model, [(x,)])
+
+    def test_buffer_reduction_range(self):
+        class Reduce(torch.nn.Module):
+            def __init__(self, op):
+                super().__init__()
+                self.op = op
+
+            def forward(self, x):
+                return self.op(x, dim=-1, keepdim=True)
+
+        for op in (torch.sum, torch.mean, torch.amax):
+            with self.subTest(op=op):
+                width, value = (20000, 4) if op == torch.sum else (7, 80000)
+                x = torch.tensor([value, -value], dtype=torch.float32)[:, None].repeat(
+                    1, width
+                )
+                model = Reduce(op)
+                edge = self._lower(model, (x,), storage=VkStorageType.BUFFER)
+                self._run(edge, model, [(x,)], atol=0, rtol=0)
 
     @unittest.skipUnless(USING_SWIFTSHADER, "requires a device without 8-bit buffers")
     def test_bool_buffers_fail_cleanly_without_8bit_storage(self):

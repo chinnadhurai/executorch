@@ -355,6 +355,9 @@ def register_eq_scalar():
         outputs_dtypes=utils.BOOL_T,
         supports_resize=True,
         supports_highdim=True,
+        are_node_inputs_supported_fn=lambda node: is_scalar_value_supported(
+            node.args[1], node.args[0].meta["val"].dtype
+        ),
     )
 
 
@@ -1917,6 +1920,9 @@ def register_compare_scalar_ops():
         outputs_dtypes=utils.BOOL_T,
         supports_resize=True,
         supports_highdim=True,
+        are_node_inputs_supported_fn=lambda node: is_scalar_value_supported(
+            node.args[1], node.args[0].meta["val"].dtype
+        ),
     )
 
 

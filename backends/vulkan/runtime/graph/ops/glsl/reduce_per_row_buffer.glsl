@@ -14,6 +14,7 @@ ${define_required_extensions("buffer", DTYPE)}
 
 #define ACCUM_T ${accum_scalar_type(DTYPE)}
 #define T ${texel_load_component_type(DTYPE, "buffer")}
+#define T_IS_FLOAT16 ${int(DTYPE == "half")}
 
 #define NUM_OUTPUTS_PER_WG 1
 #define NUM_WORKERS_PER_OUTPUT 64
@@ -117,9 +118,6 @@ void main() {
 #ifdef OUTPUT_IS_INDICES
     t_out[out_bufi] = int(local_accum.idx);
 #else
-$if DTYPE == "uint8":
-    t_out[out_bufi] = T(local_accum.val);
-$else:
     t_out[out_bufi] = convert_to_T(local_accum.val);
 #endif
   }
